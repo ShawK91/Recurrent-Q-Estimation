@@ -7,16 +7,16 @@ import keras
 
 # MACROS
 # Gridworld Dimensions
-grid_row = 5
-grid_col = 5
+grid_row = 8
+grid_col = 8
 observability = 1
-hidden_nodes = 35
+hidden_nodes = 50
 epsilon = 0.5  # Exploration Policy
 alpha = 0.5  # Learning rate
 gamma = 0.7 # Discount rate
-total_steps = 100 #Total roaming steps without goal before termination
-num_agents = 3
-num_poi = 2
+total_steps = 250 #Total roaming steps without goal before termination
+num_agents = 9
+num_poi = 15
 total_train_epoch = 100000
 angle_res = 10
 online_learning = False
@@ -24,9 +24,9 @@ agent_rand = True
 poi_rand = True
 
 #ABLATION VARS
-use_rnn = False # Use recurrent instead of normal network
+use_rnn = True # Use recurrent instead of normal network
 success_replay  = True
-neat_growth = 2
+neat_growth = 7
 use_prune = True #Prune duplicates
 angled_repr = True
 
@@ -143,21 +143,21 @@ class statistics():
         self.tr_reward_mat = []
 
     def save_csv(self, reward, coverage, train_epoch):
-        self.tr_reward.append(reward)
-        self.tr_coverage.append(coverage)
+        self.tr_reward.append(np.array([train_epoch, reward]))
+        self.tr_coverage.append(np.array([train_epoch, coverage]))
 
-        np.savetxt('reward.csv', np.array(self.tr_reward), fmt='%.3f')
-        np.savetxt('coverage.csv', np.array(self.tr_coverage), fmt='%.3f')
+        np.savetxt('reward.csv', np.array(self.tr_reward), fmt='%.3f', delimiter=',')
+        np.savetxt('coverage.csv', np.array(self.tr_coverage), fmt='%.3f', delimiter=',')
 
         self.reward_matrix = np.roll(self.reward_matrix, -1)
         self.reward_matrix[-1] = reward
         self.coverage_matrix = np.roll(self.coverage_matrix, -1)
         self.coverage_matrix[-1] = coverage
         if self.reward_matrix[0] != 10000:
-            self.tr_reward_mat.append(np.average(self.reward_matrix))
-            np.savetxt('reward_matrix.csv', np.array(self.tr_reward_mat), fmt='%.3f')
-            self.tr_coverage_mat.append(np.average(self.coverage_matrix))
-            np.savetxt('coverage_matrix.csv', np.array(self.tr_coverage_mat), fmt='%.3f')
+            self.tr_reward_mat.append(np.array([train_epoch, np.average(self.reward_matrix)]))
+            np.savetxt('reward_matrix.csv', np.array(self.tr_reward_mat), fmt='%.3f', delimiter=',')
+            self.tr_coverage_mat.append(np.array([train_epoch, np.average(self.coverage_matrix)]))
+            np.savetxt('coverage_matrix.csv', np.array(self.tr_coverage_mat), fmt='%.3f', delimiter=',')
 
 
 
@@ -290,14 +290,22 @@ if __name__ == "__main__":
                 if len(q_updates[i]) < 1: #If update list is empty
                     continue
                 if use_prune:
+                    #TODO: REVISIT PRUNING
                     # #Prune update list by taking out duplicates
                     indice_del = []
                     for j in range(len(q_updates[i])):
                         index = len(q_updates[i]) - j -1
                         for k in range(index):
-                            #if sum(abs(update_states[i][index] - update_states[i][k])) == 0:
-                            if board_posit[i][index][0] == board_posit[i][k][0] and board_posit[i][index][1] == board_posit[i][k][1]:
-                                indice_del.append(k)
+                            if not use_rnn:
+                                if sum(abs(update_states[i][index] - update_states[i][k])) == 0:
+                                #if board_posit[i][index][0] == board_posit[i][k][0] and board_posit[i][index][1] == board_posit[i][k][1]:
+                                    indice_del.append(k)
+                            else:
+                                if sum(sum(abs(update_states[i][index] - update_states[i][k]))) == 0:
+                                #if board_posit[i][index][0] == board_posit[i][k][0] and board_posit[i][index][1] == board_posit[i][k][1]:
+                                    indice_del.append(k)
+
+                    print indice_del
                     indice_del = list(set(indice_del))
                     for ind in sorted(indice_del, reverse=True): #Delete dulicates
                         del q_updates[i][ind]
@@ -338,24 +346,6 @@ if __name__ == "__main__":
         if train_epoch % 100 == 0:
             tot_reward, coverage = test_dqn(q_model, gridworld)
             tracker.save_csv(tot_reward, coverage, train_epoch)
-
-
-
-
-            # tracker.reward_matrix = np.roll(tracker.reward_matrix, -1); tracker.success_matrix = np.roll(tracker.success_matrix, -1)
-            # #if steps <= gridworld.optimal_steps*1.5: success_matrix[-1] = 1
-            # if steps < total_steps: success_matrix[-1] = 1
-            # else: success_matrix[-1] = 0
-            # reward_matrix[-1] = tot_reward
-            #
-            # tr_reward = np.append(tr_reward, np.average(reward_matrix))
-            # np.savetxt('reward.csv', tr_reward, fmt='%.3f')
-            # tr_success = np.append(tr_success, np.sum(success_matrix))
-            # np.savetxt('hist.csv', tr_success, fmt='%.3f')
-            # if steps <= gridworld.optimal_steps / 2: category = 'Quasi-Optimal'
-            # elif steps < gridworld.optimal_steps and steps < total_steps: category = 'Sub-Optimal'
-            # else: category = 'Failure'
-
             print 'Epochs:', tracker.train_goal_met, 'met of', train_epoch, 'Epsilon', epsilon, ' Alpha:', alpha, 'Gridsize', grid_col, 'Coverage:', coverage, '  Reward: ', tot_reward
 
 

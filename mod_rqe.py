@@ -18,7 +18,7 @@ def save_model(model):
     model.save_weights('shaw_2/model_weights.h5',overwrite=True)
 
 class Gridworld:
-    def __init__(self, dim_row = 10, dim_column = 10, observe = 2, num_agents = 2, num_poi = 2, agent_rand = False, poi_rand = False, angle_res = 10, angled_repr = False, obs_dist = 1):
+    def __init__(self, dim_row = 10, dim_column = 10, observe = 2, num_agents = 2, num_poi = 2, agent_rand = False, poi_rand = False, angle_res = 10, angled_repr = False, obs_dist = 2):
         self.observe = observe
         self.dim_row = dim_row
         self.dim_col = dim_column
