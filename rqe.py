@@ -1,34 +1,38 @@
-import numpy as np
 from random import randint
-import random, sys
+import random, sys, math
 import numpy as np
 import mod_rqe as mod
-import keras
 
 # MACROS
-# Gridworld Dimensions
-grid_row = 8
-grid_col = 8
+grid_row = 7
+grid_col = 7
+obs_dist = 1 #Observe distance (Radius of POI that agents have to be in for successful observation)
+coupling = 2 #Number of agents required to simultaneously observe a POI
 observability = 1
-hidden_nodes = 50
+hidden_nodes = 10
 epsilon = 0.5  # Exploration Policy
-alpha = 0.5  # Learning rate
+alpha = 0.25  # Learning rate
 gamma = 0.7 # Discount rate
-total_steps = 250 #Total roaming steps without goal before termination
-num_agents = 9
-num_poi = 15
-total_train_epoch = 100000
+total_steps = 50 #Total roaming steps without goal before termination
+num_agents = 3
+num_poi = 3
+total_train_epoch = 150000
 angle_res = 10
 online_learning = False
-agent_rand = True
-poi_rand = True
+agent_rand = 1
+poi_rand = 1
 
 #ABLATION VARS
-use_rnn = True # Use recurrent instead of normal network
-success_replay  = True
-neat_growth = 7
+use_rnn = 1 # Use recurrent instead of normal network
+success_replay  = False
+neat_growth = 0
 use_prune = True #Prune duplicates
 angled_repr = True
+temperature = 0.1
+
+if not use_rnn:
+    hidden_nodes *= 5 #Normalize RNN and NN flexibility
+
 
 
 def test_random(gridworld,  illustrate = False):
@@ -57,11 +61,13 @@ def test_random(gridworld,  illustrate = False):
     return rand_suc/1000
 
 def test_dqn(q_model, gridworld, illustrate = False, total_samples = 10):
+    if not(agent_rand and poi_rand): total_samples = 1 #If deterministic 1 sample is enough
     cumul_rew = 0; cumul_coverage = 0
     for sample in range(total_samples):
         nn_state, steps, tot_reward = reset_board()
         #hist = np.reshape(np.zeros(5 * num_agents), (num_agents, 5))  # Histogram of action taken
         for steps in range(total_steps):  # One training episode till goal is not reached
+
             for agent_id in range(num_agents):  # 1 turn per agent
                 q_vals = get_qvalues(nn_state[agent_id], q_model)  # for first step, calculate q_vals here
                 action = np.argmax(q_vals)
@@ -73,12 +79,13 @@ def test_dqn(q_model, gridworld, illustrate = False, total_samples = 10):
                 reward, _ = gridworld.move_and_get_reward(agent_id, action)
                 tot_reward += reward
                 nn_state[agent_id] = gridworld.referesh_state(nn_state[agent_id], agent_id, use_rnn)
-                if illustrate:
+                if illustrate and sample == 0:
                     mod.dispGrid(gridworld)
-                    print agent_id, action, reward
+                    print reward
             if gridworld.check_goal_complete():
                 #mod.dispGrid(gridworld)
                 break
+
         cumul_rew += tot_reward/(steps+1); cumul_coverage += sum(gridworld.goal_complete) * 1.0/gridworld.num_poi
     return cumul_rew/total_samples, cumul_coverage/total_samples
 
@@ -114,12 +121,14 @@ def get_qvalues(nn_state, q_model):
         values[i] = q_model[i].predict(nn_state)
     return values
 
-def decay(epsilon, alpha):
+def decay(epsilon, alpha, temperature):
     if epsilon > 0.1:
         epsilon -= 0.00005
     if alpha > 0.1:
         alpha -= 0.00005
-    return epsilon, alpha
+    if temperature > 0.2:
+        temperature -= 0.003
+    return epsilon, alpha, temperature
 
 def reset_trajectories():
     trajectory_states = []
@@ -129,6 +138,19 @@ def reset_trajectories():
     trajectory_qval = []
     trajectory_board_pos = []
     return trajectory_states, trajectory_action, trajectory_reward, trajectory_max_q, trajectory_qval, trajectory_board_pos
+
+def softmax_policy(q_vals, temperature):
+    probs = np.copy(q_vals)
+    for i in range(len(q_vals)):
+        probs[i] = math.exp(q_vals[i]/temperature)
+    probs = probs/np.sum(probs) #Normalize
+    rand = random.random()
+    counter = 0
+    for i in range(len(probs)):
+        counter += probs[i]
+        if rand < counter:
+            return i
+
 
 class statistics():
     def __init__(self):
@@ -163,17 +185,19 @@ class statistics():
 
 if __name__ == "__main__":
     tracker = statistics()
-    gridworld = mod.Gridworld(grid_row, grid_col, observability, num_agents, num_poi, agent_rand, poi_rand, angled_repr = angled_repr, angle_res = angle_res) #Create gridworld
+    gridworld = mod.Gridworld(grid_row, grid_col, observability, num_agents, num_poi, agent_rand, poi_rand, angled_repr = angled_repr, angle_res = angle_res, obs_dist = obs_dist, coupling= coupling) #Create gridworld
     mod.dispGrid(gridworld)
 
     #initialize Q-estimator ensemble
     q_model = []
     if use_rnn:
         for i in range(5):
-            q_model.append(mod.init_rnn(gridworld, hidden_nodes, angled_repr, angle_res)) #Recurrent Q-estimator
+            q_model.append(mod.init_rnn(gridworld, hidden_nodes, angled_repr, angle_res, design=1)) #Recurrent Q-estimator
+        mod.save_model_architecture(q_model[0]) #Save architecture
     else:
         for i in range(5):
             q_model.append(mod.init_nn(gridworld, hidden_nodes, angled_repr, angle_res)) #Normal Q-estimator
+        mod.save_model_architecture(q_model[0]) #Save architecture
     print q_model[0].summary()
     success_traj = [[[],[]]] #Success trajectory initialization for success replay
     for i in range(4):
@@ -181,17 +205,18 @@ if __name__ == "__main__":
 
     for train_epoch in range(total_train_epoch): #Training Epochs Main Loop
         if train_epoch == 0: continue
-        epsilon, alpha = decay(epsilon, alpha)
+        epsilon, alpha, temperature = decay(epsilon, alpha, temperature)
         nn_state, steps, tot_reward = reset_board() #Reset board
         trajectory_states, trajectory_action, trajectory_reward, trajectory_max_q, trajectory_qval, trajectory_board_pos = reset_trajectories()  #Reset trajectories
         if neat_growth > 0 and train_epoch % 1000 == 0: #complexity gradient
             grid_row += 1; grid_col += 1; neat_growth -= 1
-            gridworld = mod.Gridworld(grid_row, grid_col, observability, num_agents, num_poi, agent_rand, poi_rand, angled_repr=angled_repr, angle_res=angle_res) #Grow Grid
+            gridworld = mod.Gridworld(grid_row, grid_col, observability, num_agents, num_poi, agent_rand, poi_rand, angled_repr=angled_repr, angle_res=angle_res, obs_dist = obs_dist, coupling= coupling) #Grow Grid
             mod.dispGrid(gridworld)
             print 'GRIDWORLD INCREASED'
             epsilon = 0.5  # Exploration Policy
             alpha = 0.3  # Learning rate
             gamma = 0.3  # Discount rate
+            temperature = 100
 
 
         for steps in range(total_steps): #One training episode till goal is not reached
@@ -207,11 +232,20 @@ if __name__ == "__main__":
                     action = randint(0, len(q_model)-1)
 
                 if random.random() < epsilon and steps % 7 != 0: #Random action epsilon greedy step + data sampling
+                    #action = softmax_policy(q_vals, temperature)
                     action = randint(0,4)
+                #action = softmax_policy(q_vals, temperature)
+
+
+
+
                 trajectory_qval.append(q_vals[action]) #Record q_val of the action actually taken
 
                 #Get Reward and move
                 reward, assist_agent = gridworld.move_and_get_reward(agent_id, action)
+                if gridworld.check_goal_complete(): #If goal complete reward all
+                    reward = 1
+
                 tot_reward += reward
 
                 # Update current state
@@ -261,10 +295,10 @@ if __name__ == "__main__":
             all_q_updates = np.zeros(len(trajectory_states))  # All updates
             eff_alpha = alpha
             eff_gamma = gamma
-            if (steps + 1) < total_steps: #Adjust effective learning rate and gamma for successful finds
-                eff_alpha = alpha + 0.3; eff_gamma = gamma + 0.3
-                if eff_alpha > 1.0: eff_alpha = 0.99
-                if eff_gamma > 1.0: eff_gamma = 0.99
+            # if (steps + 1) < total_steps: #Adjust effective learning rate and gamma for successful finds
+            #     eff_alpha = alpha + 0.3; #eff_gamma = gamma + 0.3
+            #     if eff_alpha > 1.0: eff_alpha = 0.99
+            #     if eff_gamma > 1.0: eff_gamma = 0.99
 
             for example in range(len(trajectory_states)): #Compute updated Q-Values
                 index = len(trajectory_states) - example - 1  # Index from back
@@ -297,15 +331,14 @@ if __name__ == "__main__":
                         index = len(q_updates[i]) - j -1
                         for k in range(index):
                             if not use_rnn:
-                                if sum(abs(update_states[i][index] - update_states[i][k])) == 0:
-                                #if board_posit[i][index][0] == board_posit[i][k][0] and board_posit[i][index][1] == board_posit[i][k][1]:
+                                #if sum(abs(update_states[i][index] - update_states[i][k])) == 0:
+                                if board_posit[i][index][0] == board_posit[i][k][0] and board_posit[i][index][1] == board_posit[i][k][1]:
                                     indice_del.append(k)
                             else:
-                                if sum(sum(abs(update_states[i][index] - update_states[i][k]))) == 0:
-                                #if board_posit[i][index][0] == board_posit[i][k][0] and board_posit[i][index][1] == board_posit[i][k][1]:
+                                #if sum(sum(abs(update_states[i][index] - update_states[i][k]))) == 0:
+                                if board_posit[i][index][0] == board_posit[i][k][0] and board_posit[i][index][1] == board_posit[i][k][1]:
                                     indice_del.append(k)
 
-                    print indice_del
                     indice_del = list(set(indice_del))
                     for ind in sorted(indice_del, reverse=True): #Delete dulicates
                         del q_updates[i][ind]
@@ -338,15 +371,15 @@ if __name__ == "__main__":
                     q_model[i].fit(x, y, verbose=0, nb_epoch=1)
 
         #Save RQE net
-        if train_epoch % 5000 == 0:  # Save Qmodel
-            for i in range(len(q_model)):
-                q_model[i].save_weights('Models/model_weights_' + str(i) + '.h5', overwrite=True)
+        if (train_epoch + 1) % 10000 == 0:  # Save Qmodel
+            mod.save_qmodel(q_model)
 
         #UI and Statisctics
         if train_epoch % 100 == 0:
-            tot_reward, coverage = test_dqn(q_model, gridworld)
+            if train_epoch % 1000 == 0: tot_reward, coverage = test_dqn(q_model, gridworld, illustrate= True)
+            else: tot_reward, coverage = test_dqn(q_model, gridworld)
             tracker.save_csv(tot_reward, coverage, train_epoch)
-            print 'Epochs:', tracker.train_goal_met, 'met of', train_epoch, 'Epsilon', epsilon, ' Alpha:', alpha, 'Gridsize', grid_col, 'Coverage:', coverage, '  Reward: ', tot_reward
+            print 'Epochs:', tracker.train_goal_met, 'met of', train_epoch, 'Gridsize', grid_col, 'Coverage:', np.average(tracker.coverage_matrix), 'Reward', np.average(tracker.reward_matrix)#, 'Coverage:', coverage, '  Reward: ', tot_rewar
 
 
 

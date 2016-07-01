@@ -3,9 +3,10 @@ from random import randint
 from keras.models import Sequential
 from keras.layers import Dense, Dropout, Activation
 from keras.layers import LSTM, GRU, SimpleRNN
-from keras.layers.advanced_activations import LeakyReLU, PReLU
+from keras.layers.advanced_activations import LeakyReLU, PReLU, SReLU
 from keras.models import model_from_json
 from keras.layers.normalization import BatchNormalization
+from keras.optimizers import SGD, Nadam
 import math, sys
 import json
 import numpy as np
@@ -18,31 +19,35 @@ def save_model(model):
     model.save_weights('shaw_2/model_weights.h5',overwrite=True)
 
 class Gridworld:
-    def __init__(self, dim_row = 10, dim_column = 10, observe = 2, num_agents = 2, num_poi = 2, agent_rand = False, poi_rand = False, angle_res = 10, angled_repr = False, obs_dist = 2):
-        self.observe = observe
+    def __init__(self, dim_row = 10, dim_column = 10, observe = 2, num_agents = 2, num_poi = 2, agent_rand = False, poi_rand = False, angle_res = 10, angled_repr = False, obs_dist = 1, coupling = 2):
+        self.observe = observe #Deprecated
         self.dim_row = dim_row
         self.dim_col = dim_column
         self.num_agents = num_agents
         self.angle_res = angle_res #Angle resolution
         self.angled_repr = angled_repr #Angled state representation
         if num_agents > 1:
-            self.coupling = 2 #coupling requirement
+            self.coupling = coupling #coupling requirement
         else:
             self.coupling = 1
-        self.obs_dist = obs_dist
+        self.obs_dist = obs_dist #Observation radius requirements
         self.num_poi = num_poi
+        self.num_poi = num_poi
+
         self.state = np.zeros((self.dim_row + self.observe*2, self.dim_col + self.observe*2)) #EMPTY SPACE = 0, AGENT = 1, #POI = 2, WALL = 3
         self.init_wall()
         self.poi_pos = []
         self.goal_complete = []
+        self.poi_soft_status = []
         for i in range(self.num_poi):
             self.init_poi(poi_rand) #Initialize POIs
             self.goal_complete.append(False)
+            self.poi_soft_status.append([])
         self.agent_pos = []
         for i in range(self.num_agents):
             self.init_agent(agent_rand)
-
         self.optimal_steps = self.get_optimal_steps()
+        self.update_soft_states()
 
 
     def init_wall(self):
@@ -90,17 +95,18 @@ class Gridworld:
                     break
 
         else:
-            #x = self.state.shape[0] - self.observe-1 ;y = self.state.shape[1] - self.observe-1 #Goals at ends
-            x = self.state.shape[0]/2 + 1 ;y = self.state.shape[1]/2 #Goals in middle
+            x = self.state.shape[0] - self.observe-1 ;y = self.state.shape[1] - self.observe-1 #Goals at ends
+            #x = self.state.shape[0]/2 + 1 ;y = self.state.shape[1]/2 #Goals in middle
             if len(self.poi_pos) > 0:
-                for i in range(len(self.poi_pos)):
-                    if x == self.poi_pos[i][0] and y == self.poi_pos[i][1]:  # Check to see for other agent
-                        y = self.state.shape[0] - self.observe - 2
-                        x = self.observe + 1
+                x = self.observe ;
+                y = self.state.shape[1] - self.observe - 1
+                # for i in range(len(self.poi_pos)):
+                #     if x == self.poi_pos[i][0] and y == self.poi_pos[i][1]:  # Check to see for other agent
+                #         y = self.state.shape[0] - self.observe - 2
+                #         x = self.observe + 1
         self.state[x][y] = 2
         self.poi_pos.append([x, y])
         return [x,y]
-
 
     def init_agent(self, rand_start):
         start = self.observe
@@ -132,69 +138,23 @@ class Gridworld:
         return [x,y]
 
 
-    def bck_init_poi(self, rand_start):
-        start = self.observe
-        end = self.state.shape[0] - self.observe-1
-
-        if rand_start:
-            while True:
-                x = randint(start, end)
-                y = randint(start + (end-start)/2, end)
-                if self.check_spawn(x, y):
-                    break
-
-        else:
-            #x = self.state.shape[0] - self.observe-1 ;y = self.state.shape[1] - self.observe-1 #Goals at ends
-            x = self.state.shape[0]/2 + 1 ;y = self.state.shape[1]/2 #Goals in middle
-            if len(self.poi_pos) > 0:
-                for i in range(len(self.poi_pos)):
-                    if x == self.poi_pos[i][0] and y == self.poi_pos[i][1]:  # Check to see for other agent
-                        y = self.state.shape[0] - self.observe - 2
-                        x = self.observe + 1
-        self.state[x][y] = 2
-        self.poi_pos.append([x, y])
-        return [x,y]
-
-    def bck_init_agent(self, rand_start):
-        start = self.observe
-        end = self.state.shape[0] - self.observe-1
-        if rand_start:
-            while True:
-                x = randint(start, end)
-                y = randint(start, (end - start) / 2)
-                if self.check_spawn(x, y):
-                    break
-        else: #Not random
-            while True:
-                if len(self.agent_pos) == 0:
-                    x = start; y = start
-                if len(self.agent_pos) == 1:
-                    x = start + (end - start) / 2; y = start
-                if len(self.agent_pos) == 2:
-                    x = end; y = start
-                if len(self.agent_pos) > 2:
-                    x = start + len(self.agent_pos); y = start
-                for i in range(len(self.agent_pos)):
-                    if x == self.agent_pos[i][0] and y == self.agent_pos[i][1]:  # Check to see for other POIs
-                        continue
-                break
-        self.state[x][y] = 1 #Agent Code
-        self.agent_pos.append([x,y])
-        return [x,y]
-
     def reset(self, agent_rand, poi_rand):
         self.state = np.zeros((self.dim_row + self.observe*2, self.dim_col + self.observe*2)) #EMPTY SPACE = 0, AGENT = 1, #POI = 2, WALL = 3
         self.init_wall()
         self.poi_pos = []
+        self.goal_complete = []
+        self.poi_soft_status = []
         for i in range(self.num_poi):
-            self.init_poi(poi_rand)  # Initialize POIs
-            self.goal_complete[i] = False
+            self.init_poi(poi_rand) #Initialize POIs
+            self.goal_complete.append(False)
+            self.poi_soft_status.append([])
         self.agent_pos = []
         for i in range(self.num_agents):
             self.init_agent(agent_rand)
         self.optimal_steps = self.get_optimal_steps()
+        self.update_soft_states()
 
-    def move_and_get_reward(self, agent_id, action):
+    def bck_move_and_get_reward(self, agent_id, action):
         next_pos = np.copy(self.agent_pos[agent_id])
         if action == 1:
             next_pos[1] += 1  # Right
@@ -251,25 +211,83 @@ class Gridworld:
         else:
             return reward, None
 
+    def move_and_get_reward(self, agent_id, action):
+        next_pos = np.copy(self.agent_pos[agent_id])
+        if action == 1:
+            next_pos[1] += 1  # Right
+        elif action == 2:
+            next_pos[0] += 1  # Down
+        elif action == 3:
+            next_pos[1] -= 1  # Left
+        elif action == 4:
+            next_pos[0] -= 1  # Up
+
+        # Computer reward and check illegal moves
+        reward = 0 #If nothing else
+        x = next_pos[0]
+        y = next_pos[1]
+        if self.state[x][y] == 3:  # Wall
+            next_pos[0] = self.agent_pos[agent_id][0]; next_pos[1] = self.agent_pos[agent_id][1]
+            #reward = -0.0001
+        if self.state[x][y] == 1 and action != 0:  # Other Agent
+            #reward = -0.05
+            next_pos[0] = self.agent_pos[agent_id][0]; next_pos[1] = self.agent_pos[agent_id][1]
+        #if self.state[x][y] == 0 or (self.state[x][y] == 1 and action == 0):  # Free Space
+            #reward = -0.0001
+        if self.state[x][y] == 2 and action != 0: #POI
+            next_pos[0] = self.agent_pos[agent_id][0]; next_pos[1] = self.agent_pos[agent_id][1]
+
+        # Update gridworld and agent position
+        if self.state[self.agent_pos[agent_id][0]][self.agent_pos[agent_id][1]] != 2:
+            self.state[self.agent_pos[agent_id][0]][self.agent_pos[agent_id][1]] = 0
+        if self.state[next_pos[0]][next_pos[1]]!= 2:
+            self.state[next_pos[0]][next_pos[1]] = 1
+        self.agent_pos[agent_id][0] = next_pos[0]
+        self.agent_pos[agent_id][1] = next_pos[1]
+
+        #Check for credit assignment
+        for poi_id in range(self.num_poi): # POI COUPLED
+            if self.goal_complete[poi_id] == False:
+                try:
+                    self.poi_soft_status[poi_id].remove(agent_id)
+                except: 1+1
+                if abs(self.poi_pos[poi_id][0] - self.agent_pos[agent_id][0]) <= self.obs_dist and abs(self.poi_pos[poi_id][1] - self.agent_pos[agent_id][1]) <= self.obs_dist:
+                    self.poi_soft_status[poi_id].append(agent_id)
+                    reward += 1.0 - 1.0 / (len(self.poi_soft_status[poi_id]) + 1)
+                if len(self.poi_soft_status[poi_id]) >= self.coupling:
+                    self.goal_complete[poi_id] = True
+                    reward += 1
+
+        return reward, None
+
+    def update_soft_states(self): #Reset soft states
+        self.poi_soft_status = [] #Reset soft_status
+        for i in range(self.num_poi):
+            self.poi_soft_status.append([])
+        for poi_id in range(self.num_poi): # POI COUPLED
+            for ag in range(self.num_agents):
+                if abs(self.poi_pos[poi_id][0] - self.agent_pos[ag][0]) <= self.obs_dist and abs(self.poi_pos[poi_id][1] - self.agent_pos[ag][1]) <= self.obs_dist and self.goal_complete[poi_id] == False:
+                    self.poi_soft_status[poi_id].append(ag)
+
     def get_state(self, agent_id):  # Returns a flattened array around the agent position
         if self.angled_repr: #If state representation uses angle
             st = self.angled_state(agent_id)
             return st
-
-        x_beg = self.agent_pos[agent_id][0] - self.observe
-        y_beg = self.agent_pos[agent_id][1] - self.observe
-        x_end = self.agent_pos[agent_id][0] + self.observe + 1
-        y_end = self.agent_pos[agent_id][1] + self.observe + 1
-        st = np.copy(self.state)
-        st = st[x_beg:x_end, :]
-        st = st[:, y_beg:y_end]
-        st = np.reshape(st, (1, pow(self.observe * 2 + 1, 2))) # Flatten array
-        #return st
-        k = np.reshape(np.zeros(len(st[0]) * 4), (len(st[0]), 4)) #4-bit encoding
-        for i in range(len(st[0])):
-            k[i][int(st[0][i])] = 1
-        k = np.reshape(k, (1, len(st[0]) * 4))  # Flatten array
-        return k
+        else: #DEPRECATED - IGNORE (BINARY ENCODING REPRESENTATION)
+            x_beg = self.agent_pos[agent_id][0] - self.observe
+            y_beg = self.agent_pos[agent_id][1] - self.observe
+            x_end = self.agent_pos[agent_id][0] + self.observe + 1
+            y_end = self.agent_pos[agent_id][1] + self.observe + 1
+            st = np.copy(self.state)
+            st = st[x_beg:x_end, :]
+            st = st[:, y_beg:y_end]
+            st = np.reshape(st, (1, pow(self.observe * 2 + 1, 2))) # Flatten array
+            #return st
+            k = np.reshape(np.zeros(len(st[0]) * 4), (len(st[0]), 4)) #4-bit encoding
+            for i in range(len(st[0])):
+                k[i][int(st[0][i])] = 1
+            k = np.reshape(k, (1, len(st[0]) * 4))  # Flatten array
+            return k
 
     def get_first_state(self, agent_id, use_rnn):  # Get first state, action input to the q_net
         if not use_rnn: #Normal NN
@@ -349,8 +367,6 @@ class Gridworld:
                     state[bracket][3] = dist
 
 
-
-
         state = np.reshape(state, (1, 360/self.angle_res * 4)) #Flatten array
         return state
 
@@ -367,25 +383,26 @@ class prettyfloat(float):
 
 
 def init_rnn(gridworld, hidden_nodes, angled_repr, angle_res, hist_len = 3, design = 1):
-    ### BUILD THE MODEL ###
     model = Sequential()
     if angled_repr:
         sa_sp = (360/angle_res) * 4
     else:
-        sa_sp = (pow(gridworld.observe * 2 + 1,2)*4) #BIT ENCODING?????
+        sa_sp = (pow(gridworld.observe * 2 + 1,2)*4) #BIT ENCODING
     if design == 1:
-        model.add(LSTM(hidden_nodes, init= 'zero', return_sequences=False, input_shape=(hist_len, sa_sp)))
+        model.add(LSTM(hidden_nodes, init= 'he_uniform', return_sequences=False, input_shape=(hist_len, sa_sp), inner_init='orthogonal', forget_bias_init='one', inner_activation='sigmoid'))#, activation='sigmoid', inner_activation='hard_sigmoid'))
     elif design == 2:
-        model.add(SimpleRNN(hidden_nodes, init='zero', input_shape=(hist_len, sa_sp), inner_init='orthogonal'))
+        model.add(SimpleRNN(hidden_nodes, init='he_uniform', input_shape=(hist_len, sa_sp), inner_init='orthogonal'))
     elif design == 3:
-        model.add(GRU(hidden_nodes, init='zero',  input_shape=(hist_len, sa_sp),inner_init='orthogonal'))
+        model.add(GRU(hidden_nodes, init='he_uniform', consume_less= 'cpu',  input_shape=(hist_len, sa_sp),inner_init='orthogonal'))
     #model.add(Dropout(0.1))
     #model.add(LeakyReLU(alpha=.2))
+    model.add(SReLU(t_left_init='zero', a_left_init='glorot_uniform', t_right_init='glorot_uniform', a_right_init='one'))
+    #sgd = SGD(lr=0.1, decay=1e-6, momentum=0.9, nesterov=True)
     #model.add(Activation('sigmoid'))
     #model.add(BatchNormalization())
-    model.add(Activation('sigmoid'))
-    model.add(Dense(1, init= 'zero'))
-    model.compile(loss='mse', optimizer='rmsprop')
+    #model.add(Activation('relu'))
+    model.add(Dense(1, init= 'he_uniform'))
+    model.compile(loss='mse', optimizer='Nadam')
     return model
 
 def init_nn(gridworld, hidden_nodes, angled_repr, angle_res):
@@ -394,12 +411,15 @@ def init_nn(gridworld, hidden_nodes, angled_repr, angle_res):
         sa_sp = (360/angle_res) * 4
     else:
         sa_sp = (pow(gridworld.observe * 2 + 1,2)) * 4
-    model.add(Dense(hidden_nodes, input_dim=sa_sp, init='zero'))
+    model.add(Dense(hidden_nodes, input_dim=sa_sp, init='he_uniform'))
     #model.add(LeakyReLU(alpha=.2))
-    #model.add(Dropout(0.1))
+    #model.add(SReLU(t_left_init='zero', a_left_init='glorot_uniform', t_right_init='glorot_uniform', a_right_init='one'))
     model.add(Activation('sigmoid'))
-    model.add(Dense(1, init= 'zero'))
-    model.compile(loss='mse', optimizer='adam')
+    #model.add(Dropout(0.1))
+    #model.add(Activation('sigmoid'))
+    #sgd = SGD(lr=0.1, decay=1e-6, momentum=0.9, nesterov=True)
+    model.add(Dense(1, init= 'he_uniform'))
+    model.compile(loss='mse', optimizer='Nadam')
     return model
 
 
@@ -416,6 +436,46 @@ def test_hist(q_model):
     return q_model.predict(hist_input)
 
 def dispGrid(gridworld, state = None, full=True, agent_id = None):
+
+
+    if state == None: #Given agentq
+        if full:
+            st = np.copy(gridworld.state)
+        else:
+            x_beg = gridworld.agent_pos[agent_id][0] - gridworld.observe
+            y_beg = gridworld.agent_pos[agent_id][1] - gridworld.observe
+            x_end = gridworld.agent_pos[agent_id][0] + gridworld.observe + 1
+            y_end = gridworld.agent_pos[agent_id][1] + gridworld.observe + 1
+            st = np.copy(gridworld.state)
+            st = st[x_beg:x_end,:]
+            st = st[:,y_beg:y_end]
+    else:
+        st = []
+        print len(state)
+        row_leng = int(math.sqrt(len(state)))
+        for i in range(row_leng):
+            ig = []
+            for j in range(row_leng):
+                ig.append(state[i*row_leng + j])
+            st.append(ig)
+
+    grid = [["-" for i in range(len(st))] for i in range(len(st))]
+    grid[0][0] = "o"
+    for i in range(len(st)):
+        for j in range(len(st)):
+            if st[i][j] == 2:
+                grid[i][j] = '$'
+            if st[i][j] == 1:
+                grid[i][j] = '*'
+            if st[i][j] == 3:
+                grid[i][j] = '#'
+    for row in grid:
+        for e in row:
+            print e,
+        print '\t'
+
+
+def bck_dispGrid(gridworld, state = None, full=True, agent_id = None):
 
     if state == None: #Given agentq
         if full:
@@ -473,4 +533,49 @@ def test_q_table(q_table, gridworld, agent1):
 
 
 
+def load_model_architecture(seed='Models/architecture.json'):  # Get model architecture
+    import yaml
+    from keras.models import model_from_yaml
+    with open('Models/architecture.yaml', 'r') as f:
+        yaml_string = yaml.load(f)
+    model_arch = model_from_yaml(yaml_string)
+    return model_arch
 
+def save_model_architecture(qmodel, foldername = '/Models/'):
+    import os, yaml
+    import json
+    from keras.models import model_from_json
+    from keras.models import model_from_yaml
+    #Create folder to store all networks if not present
+    filename = os.getcwd() + foldername
+    if not os.path.exists(os.path.dirname(filename)):
+        try: os.makedirs(os.path.dirname(filename))
+        except: 1+1
+    yaml_string = qmodel.to_yaml()
+    output_stream = open("Models/architecture.yaml", "w")
+    yaml.dump(yaml_string, output_stream)#, default_flow_style=False)
+
+
+
+
+def load_model(foldername = 'Models/'):
+    import copy
+    q_model = []
+    model_arch = load_model_architecture()
+    for i in range(5):
+        ig = copy.deepcopy(model_arch)
+        ig.load_weights(foldername + 'model_weights_' + str(i) + '.h5')
+        q_model.append(ig)
+        #q_model[i].compile(loss='mse', optimizer='rmsprop')
+    return q_model
+
+def save_qmodel(q_model, foldername = '/Models/'):
+    import os
+    #Create folder to store all networks if not present
+    filename = os.getcwd() + foldername
+    if not os.path.exists(os.path.dirname(filename)):
+        try: os.makedirs(os.path.dirname(filename))
+        except: 1+1
+    #Save weights
+    for i in range(len(q_model)):
+        q_model[i].save_weights('Models/model_weights_' + str(i) + '.h5', overwrite=True)
